@@ -243,9 +243,23 @@ class Chrome:
         """ 
             origin_url,username_element,username_value,password_element,signon_realm
         """
+        #  process to password forget 
+        preflg_out = 1 if 'preferred' in data_out[0].keys() else 0
+        preflg_in  = 1 if 'preferred' in data_in[0].keys()  else 0
+
         conn = sqlite3.connect(self.working_dir + "Login Data",timeout=100)
         self.login_col.remove('id')
         for comp_rec in data_in:
+            if preflg_in ==0 and preflg_out==1:
+                comp_rec['preferred'] = 1
+            if preflg_in == 1 and preflg_out == 0:
+                if comp_rec['preferred'] == 0: ## don't sync the password forgotten
+                    continue
+                else:
+                    comp_rec.remove('preferred')
+            if preflg_in == 1 and preflg_out == 1 and comp_rec['preferred'] == 0:
+                continue
+
             flag = 0
             for rec in data_out:
                 if comp_rec['origin_url'] == rec['origin_url'] and comp_rec['username_element'] ==rec['username_element'] and comp_rec['password_element'] == rec['password_element'] \
@@ -253,7 +267,6 @@ class Chrome:
                     flag = 1
                     break
             if flag == 0:
-                #yield(self.sys_in(comp_rec,conn))
                 self.syc_in(comp_rec,conn)
         conn.commit()
         conn.close
@@ -262,9 +275,8 @@ class Chrome:
     def syc_in(self,data,conn,typ='login'):
         if typ =='login':
             data['password_value'] =b'v11' + self.chrome_os.encrypt_func(data['password_value'])
-            #print('\n '  + data['password_value'])
-            data['form_data'] = data['form_data'].encode('utf8','replace')
-            data['possible_username_pairs'] = data['possible_username_pairs'].encode('utf8')
+            data['form_data'] = data['form_data'].encode('utf8','replace') if not data['form_data'] is None else None
+            data['possible_username_pairs'] = data['possible_username_pairs'].encode('utf8','replace') if not data['possible_username_pairs'] is None else None 
             tblcol = self.login_col
             tbl = 'logins'
             sqlappend = [data[k] if k not in ['form_data','possible_username_pairs'] else sqlite3.Binary(data[k]) for k in tblcol]
@@ -276,7 +288,6 @@ class Chrome:
         
         sql = f'insert into {tbl} (' +  ','.join(tblcol)  +') values(' +','.join(['?' for i in tblcol]) + ')'
         conn.execute(sql,sqlappend)
-        #conn.commit()
 
     def sync_cookies(self,data_in,data_out):
         """
